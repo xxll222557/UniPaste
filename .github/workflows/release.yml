@@ -1,0 +1,167 @@
+name: Build And Publish Pre-Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的版本标签，例如 v0.1.0"
+        required: true
+        type: string
+      target_ref:
+        description: "手动触发时要构建的分支或提交，不填则使用仓库默认分支"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform_name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform_name: macOS
+            artifact_name: release-macos
+            bundles: dmg
+            asset_globs: |
+              src-tauri/target/release/bundle/dmg/*.dmg
+          - os: windows-latest
+            platform_name: Windows
+            artifact_name: release-windows
+            bundles: nsis
+            asset_globs: |
+              src-tauri/target/release/bundle/nsis/*.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build release bundle
+        run: npx tauri build --bundles ${{ matrix.bundles }}
+
+      - name: Collect release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "release-assets/${{ matrix.platform_name }}"
+          shopt -s nullglob
+
+          while IFS= read -r pattern; do
+            [[ -z "$pattern" ]] && continue
+            matches=( $pattern )
+            for file in "${matches[@]}"; do
+              cp "$file" "release-assets/${{ matrix.platform_name }}/"
+            done
+          done <<'EOF'
+          ${{ matrix.asset_globs }}
+          EOF
+
+          if ! find "release-assets/${{ matrix.platform_name }}" -type f | grep -q .; then
+            echo "No release assets were collected for ${{ matrix.platform_name }}" >&2
+            exit 1
+          fi
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release-assets/${{ matrix.platform_name }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish Pre-Release
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "target_ref=${{ inputs.target_ref || github.event.repository.default_branch }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "target_ref=${GITHUB_REF}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create prerelease if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          TARGET_REF="${{ steps.meta.outputs.target_ref }}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --prerelease --title "$TAG"
+          else
+            gh release create "$TAG" \
+              --target "$TARGET_REF" \
+              --title "$TAG" \
+              --prerelease \
+              --notes "Automated pre-release build for $TAG"
+          fi
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          mapfile -d '' files < <(find release-assets -type f -print0)
+
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "No files found to upload" >&2
+            exit 1
+          fi
+
+          gh release upload "$TAG" "${files[@]}" --clobber
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          find . -type f ! -name 'SHA256SUMS.txt' -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > SHA256SUMS.txt
+
+      - name: Upload SHA256 checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          gh release upload "$TAG" release-assets/SHA256SUMS.txt --clobber
