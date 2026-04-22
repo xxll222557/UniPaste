@@ -84,6 +84,8 @@ pub struct InnerState {
     pub clipboard_tx: broadcast::Sender<ClipboardDispatch>,
     pub last_local_hash: Mutex<Option<String>>,
     pub last_remote_hash: Mutex<Option<String>>,
+    pub last_local_hash_at_ms: AtomicU64,
+    pub last_remote_hash_at_ms: AtomicU64,
     pub suppress_until_ms: AtomicU64,
 }
 
@@ -115,6 +117,8 @@ impl ManagedState {
             clipboard_tx,
             last_local_hash: Mutex::new(None),
             last_remote_hash: Mutex::new(None),
+            last_local_hash_at_ms: AtomicU64::new(0),
+            last_remote_hash_at_ms: AtomicU64::new(0),
             suppress_until_ms: AtomicU64::new(0),
         }))
     }
@@ -154,7 +158,6 @@ impl ManagedState {
 
         let mut discovered_devices = discovered
             .values()
-            .filter(|peer| now_ms().saturating_sub(peer.last_seen_ms) < 15_000)
             .map(|peer| DiscoveredDeviceSummary {
                 device_id: peer.device_id,
                 device_name: peer.device_name.clone(),

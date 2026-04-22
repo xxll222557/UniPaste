@@ -74,6 +74,7 @@ async fn consume_events(state: ManagedState, receiver: Receiver<ServiceEvent>) {
                 }
             }
             ServiceEvent::ServiceRemoved(_, fullname) => {
+                remove_from_fullname(&state, &fullname).await;
                 state.log("INFO", format!("设备下线: {fullname}")).await;
             }
             _ => {}
@@ -130,4 +131,19 @@ async fn update_from_info(state: &ManagedState, info: ServiceInfo) -> Result<(),
     );
 
     Ok(())
+}
+
+async fn remove_from_fullname(state: &ManagedState, fullname: &str) {
+    let Some(instance) = fullname.strip_suffix(SERVICE_TYPE) else {
+        return;
+    };
+    let Some(device_id) = instance
+        .strip_prefix("unipaste-")
+        .and_then(|value| value.strip_suffix('.'))
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+    else {
+        return;
+    };
+
+    state.0.discovered_peers.write().await.remove(&device_id);
 }

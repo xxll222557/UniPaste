@@ -145,6 +145,19 @@ async function refresh() {
   }
 }
 
+function shouldPauseAutoRefresh() {
+  const activeElement = document.activeElement;
+  if (
+    activeElement &&
+    typeof activeElement.matches === "function" &&
+    activeElement.matches("input, textarea, select, [contenteditable='true']")
+  ) {
+    return true;
+  }
+
+  return Boolean(document.querySelector(".modal-backdrop"));
+}
+
 async function requestPair(deviceId) {
   await invoke("request_pair", { deviceId });
   state.activeTab = "pair";
@@ -913,4 +926,8 @@ function render() {
 }
 
 refresh();
-setInterval(refresh, 2500);
+setInterval(() => {
+  if (!shouldPauseAutoRefresh()) {
+    refresh();
+  }
+}, 2500);

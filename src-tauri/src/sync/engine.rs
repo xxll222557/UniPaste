@@ -17,7 +17,8 @@ use crate::{
 
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 const PAIR_REQUEST_TTL_MS: u64 = 90_000;
-const DISCOVERY_TTL_MS: u64 = 30_000;
+const DISCOVERY_TTL_MS: u64 = 180_000;
+const CLIPBOARD_DEDUP_WINDOW_MS: u64 = 2_500;
 const FAST_POLL_MS: u64 = 180;
 const IDLE_POLL_MS: u64 = 700;
 const PAUSED_POLL_MS: u64 = 1_000;
@@ -114,7 +115,6 @@ async fn run_connector_loop(state: ManagedState, endpoint: Endpoint) {
             let pending = state.0.pending_pairs.read().await;
             discovered
                 .values()
-                .filter(|peer| now_ms().saturating_sub(peer.last_seen_ms) < 12_000)
                 .filter(|peer| {
                     trusted.contains_key(&peer.device_id)
                         || pending
@@ -506,10 +506,14 @@ async fn run_clipboard_monitor(state: ManagedState) {
         }
 
         let mut last_local_hash = state.0.last_local_hash.lock().await;
-        if last_local_hash.as_deref() == Some(hash.as_str()) {
+        let last_local_hash_at_ms = state.0.last_local_hash_at_ms.load(Ordering::Relaxed);
+        if last_local_hash.as_deref() == Some(hash.as_str())
+            && now.saturating_sub(last_local_hash_at_ms) < CLIPBOARD_DEDUP_WINDOW_MS
+        {
             continue;
         }
         *last_local_hash = Some(hash.clone());
+        state.0.last_local_hash_at_ms.store(now, Ordering::Relaxed);
         drop(last_local_hash);
 
         if state.0.clipboard_tx.send(dispatch.clone()).is_ok() {
@@ -548,7 +552,10 @@ async fn handle_remote_clipboard(
 
     {
         let last_local_hash = state.0.last_local_hash.lock().await.clone();
-        if last_local_hash.as_deref() == Some(payload.content_hash.as_str()) {
+        let last_local_hash_at_ms = state.0.last_local_hash_at_ms.load(Ordering::Relaxed);
+        if last_local_hash.as_deref() == Some(payload.content_hash.as_str())
+            && now_ms().saturating_sub(last_local_hash_at_ms) < CLIPBOARD_DEDUP_WINDOW_MS
+        {
             return Ok(());
         }
     }
@@ -566,10 +573,18 @@ async fn handle_remote_clipboard(
         let mut last_remote_hash = state.0.last_remote_hash.lock().await;
         *last_remote_hash = Some(payload.content_hash.clone());
     }
+    state
+        .0
+        .last_remote_hash_at_ms
+        .store(now_ms(), Ordering::Relaxed);
     {
         let mut last_local_hash = state.0.last_local_hash.lock().await;
         *last_local_hash = Some(payload.content_hash.clone());
     }
+    state
+        .0
+        .last_local_hash_at_ms
+        .store(now_ms(), Ordering::Relaxed);
     state
         .0
         .suppress_until_ms
