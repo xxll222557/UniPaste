@@ -2,6 +2,8 @@
 
 UniPaste 是一个使用 Rust + Tauri 构建的局域网剪贴板同步工具，面向 macOS 与 Windows 双机协作。
 
+![UniPaste App Icon](src-tauri/icons/icon.png)
+
 当前版本已经实现：
 
 - `mDNS` 自动发现局域网设备
@@ -27,6 +29,43 @@ UniPaste 是一个使用 Rust + Tauri 构建的局域网剪贴板同步工具，
 npm install
 npx tauri dev
 ```
+
+前端开发端口固定为 `1430`，避免和其他本地项目冲突。
+
+## GitHub 持续集成与发布
+
+仓库里已经包含：
+
+- `.github/workflows/ci.yml`：每次 push / PR 自动执行 `macOS + Windows` 构建检查
+- `.github/workflows/release.yml`：在推送 `v*` 标签时自动构建并上传到 GitHub pre-release
+- `SHA256SUMS.txt`：release 工作流会自动生成并上传安装包的 SHA256 校验文件
+
+推荐首次上传流程：
+
+```bash
+git init
+git add .
+git commit -m "Initial commit"
+git branch -M main
+git remote add origin <你的 GitHub 仓库地址>
+git pull --no-rebase origin main --allow-unrelated-histories
+git push -u origin main
+```
+
+发布一个新的预发布版本：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+推送标签后，GitHub Actions 会：
+
+- 在 `macos-latest` 上构建 `dmg`
+- 在 `windows-latest` 上构建 `nsis exe`
+- 自动创建或更新对应版本的 pre-release
+- 上传安装包到 release assets
+- 额外上传 `SHA256SUMS.txt`
 
 ## macOS 调试包
 
