@@ -28,14 +28,18 @@ jobs:
         include:
           - os: macos-latest
             platform_name: macOS
+            platform_slug: macos
             artifact_name: release-macos
             bundles: dmg
+            asset_ext: dmg
             asset_globs: |
               src-tauri/target/release/bundle/dmg/*.dmg
           - os: windows-latest
             platform_name: Windows
+            platform_slug: windows
             artifact_name: release-windows
             bundles: nsis
+            asset_ext: exe
             asset_globs: |
               src-tauri/target/release/bundle/nsis/*.exe
 
@@ -64,20 +68,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
           mkdir -p "release-assets/${{ matrix.platform_name }}"
           shopt -s nullglob
+          found=0
+          index=1
 
           while IFS= read -r pattern; do
             [[ -z "$pattern" ]] && continue
             matches=( $pattern )
             for file in "${matches[@]}"; do
-              cp "$file" "release-assets/${{ matrix.platform_name }}/"
+              found=1
+              target="release-assets/${{ matrix.platform_name }}/UniPaste-${TAG}-${{ matrix.platform_slug }}"
+              if [[ ${#matches[@]} -gt 1 ]]; then
+                target="${target}-${index}"
+              fi
+              target="${target}.${{ matrix.asset_ext }}"
+              cp "$file" "$target"
+              index=$((index + 1))
             done
           done <<'EOF'
           ${{ matrix.asset_globs }}
           EOF
 
-          if ! find "release-assets/${{ matrix.platform_name }}" -type f | grep -q .; then
+          if [[ "$found" -eq 0 ]]; then
             echo "No release assets were collected for ${{ matrix.platform_name }}" >&2
             exit 1
           fi
@@ -93,13 +107,10 @@ jobs:
     name: Publish Pre-Release
     runs-on: ubuntu-latest
     needs: build
+    env:
+      GH_REPO: ${{ github.repository }}
 
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-
       - name: Resolve release metadata
         id: meta
         shell: bash
@@ -113,6 +124,76 @@ jobs:
             echo "target_ref=${GITHUB_REF}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.target_ref }}
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          BUILD_TIME="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          COMMIT_SHA="$(git rev-parse --short HEAD)"
+          PREVIOUS_TAG="$(git tag --sort=-v:refname | grep -Fxv "$TAG" | head -n 1 || true)"
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            CHANGELOG="$(git log --no-merges --pretty='- %s (`%h`)' "${PREVIOUS_TAG}..HEAD" | head -n 20)"
+          else
+            CHANGELOG="$(git log --no-merges --pretty='- %s (`%h`)' -n 20)"
+          fi
+          if [[ -z "$CHANGELOG" ]]; then
+            CHANGELOG="- No notable changes captured in git history for this build."
+          fi
+          {
+            echo "## UniPaste ${TAG}"
+            echo
+            echo "Automated pre-release build."
+            echo
+            echo "### Build Metadata"
+            echo "- Build time: ${BUILD_TIME}"
+            echo "- Commit: \`${COMMIT_SHA}\`"
+            echo "- Supported platforms: macOS, Windows"
+            if [[ -n "$PREVIOUS_TAG" ]]; then
+              echo "- Changes since: \`${PREVIOUS_TAG}\`"
+            else
+              echo "- Changes since: initial published history"
+            fi
+            echo
+            echo "### Changelog"
+            printf '%s\n' "$CHANGELOG"
+            echo
+            echo "### Included Assets"
+            find release-assets -maxdepth 2 -type f ! -name 'SHA256SUMS.txt' -printf '%f\n' | sort | sed 's/^/- /'
+            echo
+            echo "### Install"
+            echo "- macOS: download the \`.dmg\` file and open it to install UniPaste."
+            echo "- Windows: download the \`.exe\` installer and run it."
+            echo
+            echo "### Verification"
+            echo "- Download the installer for your platform."
+            echo "- Download \`SHA256SUMS.txt\` from this release."
+            echo "- Verify the installer checksum before distribution or testing."
+            echo
+            echo "macOS / Linux:"
+            echo '```bash'
+            echo 'shasum -a 256 <downloaded-file>'
+            echo 'cat SHA256SUMS.txt'
+            echo '```'
+            echo
+            echo "Windows:"
+            echo '```powershell'
+            echo 'CertUtil -hashfile <downloaded-file> SHA256'
+            echo 'Get-Content .\SHA256SUMS.txt'
+            echo '```'
+          } > RELEASE_NOTES.md
+
       - name: Create prerelease if missing
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -123,13 +204,13 @@ jobs:
           TARGET_REF="${{ steps.meta.outputs.target_ref }}"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --prerelease --title "$TAG"
+            gh release edit "$TAG" --prerelease --title "$TAG" --notes-file RELEASE_NOTES.md
           else
             gh release create "$TAG" \
               --target "$TARGET_REF" \
               --title "$TAG" \
               --prerelease \
-              --notes "Automated pre-release build for $TAG"
+              --notes-file RELEASE_NOTES.md
           fi
 
       - name: Upload release assets
@@ -139,7 +220,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.meta.outputs.tag }}"
-          mapfile -d '' files < <(find release-assets -type f -print0)
+          mapfile -d '' files < <(find release-assets -type f ! -name 'SHA256SUMS.txt' -print0)
 
           if [[ "${#files[@]}" -eq 0 ]]; then
             echo "No files found to upload" >&2
@@ -155,7 +236,7 @@ jobs:
           cd release-assets
           find . -type f ! -name 'SHA256SUMS.txt' -print0 \
             | sort -z \
-            | xargs -0 sha256sum > SHA256SUMS.txt
+            | xargs -0 sha256sum | sed 's# \./# #g' > SHA256SUMS.txt
 
       - name: Upload SHA256 checksums
         env:
