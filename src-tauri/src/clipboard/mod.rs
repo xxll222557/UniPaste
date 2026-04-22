@@ -289,7 +289,7 @@ fn safe_file_name(value: &str) -> String {
 #[cfg(windows)]
 mod windows_listener {
     use std::{
-        ptr::null_mut,
+        ptr::{null, null_mut},
         sync::{mpsc, Mutex, OnceLock},
         thread,
         time::Duration,
@@ -297,11 +297,12 @@ mod windows_listener {
 
     use windows_sys::Win32::{
         Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        System::DataExchange::AddClipboardFormatListener,
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            AddClipboardFormatListener, CreateWindowExW, DefWindowProcW, DispatchMessageW,
-            GetMessageW, PostQuitMessage, RegisterClassW, TranslateMessage, HWND_MESSAGE, MSG,
-            WM_CLIPBOARDUPDATE, WM_DESTROY, WNDCLASSW,
+            CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
+            RegisterClassW, TranslateMessage, HWND_MESSAGE, MSG, WM_CLIPBOARDUPDATE, WM_DESTROY,
+            WNDCLASSW,
         },
     };
 
@@ -339,14 +340,14 @@ mod windows_listener {
                 0,
                 0,
                 HWND_MESSAGE,
-                0,
-                hinstance,
                 null_mut(),
+                hinstance,
+                null(),
             );
-            if hwnd != 0 {
+            if hwnd != null_mut() {
                 let _ = AddClipboardFormatListener(hwnd);
                 let mut message = MSG::default();
-                while GetMessageW(&mut message, 0, 0, 0) > 0 {
+                while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
                     TranslateMessage(&message);
                     DispatchMessageW(&message);
                 }
